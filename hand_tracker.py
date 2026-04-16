@@ -5,11 +5,35 @@ from typing import Optional
 import cv2
 import mediapipe as mp
 import numpy as np
-from mediapipe.framework.formats import landmark_pb2
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
 import config
+
+
+HAND_CONNECTIONS: tuple[tuple[int, int], ...] = (
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (3, 4),  # thumb
+    (0, 5),
+    (5, 6),
+    (6, 7),
+    (7, 8),  # index
+    (5, 9),
+    (9, 10),
+    (10, 11),
+    (11, 12),  # middle
+    (9, 13),
+    (13, 14),
+    (14, 15),
+    (15, 16),  # ring
+    (13, 17),
+    (17, 18),
+    (18, 19),
+    (19, 20),  # pinky
+    (0, 17),
+)
 
 
 class HandTracker:
@@ -30,10 +54,6 @@ class HandTracker:
         self._start_time = time.time()
         self._prev_pinch: Optional[tuple[float, float]] = None
 
-        self._mp_hands = mp.solutions.hands
-        self._drawer = mp.solutions.drawing_utils
-        self._styles = mp.solutions.drawing_styles
-
     def close(self) -> None:
         if self._landmarker is not None:
             self._landmarker.close()
@@ -47,13 +67,19 @@ class HandTracker:
     def _timestamp_ms(self) -> int:
         return int((time.time() - self._start_time) * 1000.0)
 
-    def _to_landmark_list(self, hand_landmarks) -> landmark_pb2.NormalizedLandmarkList:
-        landmark_list = landmark_pb2.NormalizedLandmarkList()
+    def _draw_hand(self, img: np.ndarray, hand_landmarks) -> None:
+        h, w = img.shape[0], img.shape[1]
+        pts: list[tuple[int, int]] = []
         for lm in hand_landmarks:
-            landmark_list.landmark.append(
-                landmark_pb2.NormalizedLandmark(x=lm.x, y=lm.y, z=lm.z)
-            )
-        return landmark_list
+            pts.append((int(lm.x * w), int(lm.y * h)))
+
+        for a, b in HAND_CONNECTIONS:
+            if a < len(pts) and b < len(pts):
+                cv2.line(img, pts[a], pts[b], (0, 255, 0), 2, cv2.LINE_AA)
+
+        for x, y in pts:
+            cv2.circle(img, (x, y), 4, (255, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(img, (x, y), 4, (0, 0, 0), 1, cv2.LINE_AA)
 
     def find_hands(self, img: np.ndarray, draw: bool = True) -> np.ndarray:
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -63,13 +89,7 @@ class HandTracker:
 
         if draw and self._results and self._results.hand_landmarks:
             for hand_landmarks in self._results.hand_landmarks:
-                self._drawer.draw_landmarks(
-                    img,
-                    self._to_landmark_list(hand_landmarks),
-                    self._mp_hands.HAND_CONNECTIONS,
-                    self._styles.get_default_hand_landmarks_style(),
-                    self._styles.get_default_hand_connections_style(),
-                )
+                self._draw_hand(img, hand_landmarks)
 
         return img
 

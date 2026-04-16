@@ -1,69 +1,95 @@
+import os
+import tempfile
 import unittest
-import numpy as np
-import config
-from block_manager import BlockManager
-import ar_math
-
-class TestARLogic(unittest.TestCase):
-    def setUp(self):
-        self.mgr = BlockManager()
-        self.mgr.grid_spacing = 10 # Simpler testing
-        
-    def test_snap_to_grid(self):
-        self.assertEqual(self.mgr.snap_to_grid(12, 12, 0), (10, 10, 0))
-        self.assertEqual(self.mgr.snap_to_grid(8, 8, 0), (10, 10, 0))
-        self.assertEqual(self.mgr.snap_to_grid(4, 4, 0), (0, 0, 0))
-
-    def test_add_remove_block(self):
-        self.assertTrue(self.mgr.add_block(10, 10, 0))
-        self.assertEqual(len(self.mgr.blocks), 1)
-        
-        # Duplicate check
-        self.assertFalse(self.mgr.add_block(12, 12, 0)) # Snaps to 10,10
-        self.assertEqual(len(self.mgr.blocks), 1)
-        
-        # Remove
-        self.assertTrue(self.mgr.remove_block(10, 10, 0))
-        self.assertEqual(len(self.mgr.blocks), 0)
-        
-    def test_move_block(self):
-        self.mgr.add_block(0, 0, 0)
-        idx, _ = self.mgr.get_block_at(0, 0, 0)
-        self.assertNotEqual(idx, -1)
-        
-        # Move successfully
-        self.assertTrue(self.mgr.move_block(idx, 20, 20, 0))
-        self.assertEqual(self.mgr.blocks[0]['pos'], (20, 20, 0))
-        
-        # Move to occupied
-        self.mgr.add_block(50, 50, 0)
-        self.assertFalse(self.mgr.move_block(0, 50, 50, 0)) # Should fail
-        
-    def test_ray_cast(self):
-        # Mock Camera Matrix
-        w, h = 640, 480
-        K = ar_math.get_camera_matrix(w, h)
-        
-        # Camera looking down from (0, 0, 100) exactly
-        # No rotation for simplicity first (looking along Z)
-        # Actually our ray_cast expects camera looking at Z-plane
-        
-        # Let's use the actual config setup approximately
-        theta = np.deg2rad(45)
-        r_x = np.array([[1, 0, 0],
-                        [0, np.cos(theta), -np.sin(theta)],
-                        [0, np.sin(theta), np.cos(theta)]])
-        rvec, _ = cv2.Rodrigues(r_x)
-        tvec = np.array([0, -200, 800], dtype=np.float32)
-        
-        # Center of screen should hit somewhere on ground
-        uv = (w/2, h/2)
-        pt = ar_math.ray_cast_to_ground(uv, K, rvec, tvec)
-        self.assertIsNotNone(pt)
-        # Should be roughly (0, some_y, 0)
-        self.assertAlmostEqual(pt[0], 0, delta=1.0)
-        self.assertAlmostEqual(pt[2], 0, delta=0.001)
 
 import cv2
-if __name__ == '__main__':
+import numpy as np
+
+import ar_math
+import config
+from block_manager import BlockManager
+from export import export_to_obj
+from scene_manager import load_scene, save_scene
+
+
+class TestARLogic(unittest.TestCase):
+    def setUp(self) -> None:
+        self.mgr = BlockManager()
+
+    def test_snap_to_grid(self) -> None:
+        x, y, z = self.mgr.snap_to_grid(31, -31, 74)
+        self.assertEqual(x, round(31 / config.GRID_SPACING) * config.GRID_SPACING)
+        self.assertEqual(y, round(-31 / config.GRID_SPACING) * config.GRID_SPACING)
+        self.assertEqual(z, round(74 / config.BLOCK_SIZE) * config.BLOCK_SIZE)
+
+    def test_add_remove_block(self) -> None:
+        self.assertTrue(self.mgr.add_block(0, 0, 0, config.BLUE))
+        self.assertFalse(self.mgr.add_block(1, 1, 0, config.RED))  # snaps to same cell
+        self.assertEqual(len(self.mgr.get_blocks()), 1)
+
+        self.assertTrue(self.mgr.remove_block(0, 0, 0))
+        self.assertFalse(self.mgr.remove_block(0, 0, 0))
+        self.assertEqual(len(self.mgr.get_blocks()), 0)
+
+    def test_move_block(self) -> None:
+        self.mgr.add_block(0, 0, 0, config.BLUE)
+        self.mgr.add_block(config.GRID_SPACING, 0, 0, config.RED)
+
+        idx, _ = self.mgr.get_block_at(0, 0, 0)
+        self.assertNotEqual(idx, -1)
+        self.assertTrue(self.mgr.move_block(idx, 0, config.GRID_SPACING, 0))
+        self.assertFalse(self.mgr.move_block(idx, config.GRID_SPACING, 0, 0))  # collision
+
+    def test_undo_redo(self) -> None:
+        self.assertTrue(self.mgr.add_block(0, 0, 0, config.BLUE))
+        self.assertTrue(self.mgr.add_block(config.GRID_SPACING, 0, 0, config.RED))
+        self.assertEqual(len(self.mgr.get_blocks()), 2)
+
+        self.assertTrue(self.mgr.undo())
+        self.assertEqual(len(self.mgr.get_blocks()), 1)
+        self.assertTrue(self.mgr.redo())
+        self.assertEqual(len(self.mgr.get_blocks()), 2)
+
+    def test_ray_cast(self) -> None:
+        w, h = 1280, 720
+        K = ar_math.get_camera_matrix(w, h)
+
+        theta = np.deg2rad(45.0)
+        r_x = np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, np.cos(theta), -np.sin(theta)],
+                [0.0, np.sin(theta), np.cos(theta)],
+            ],
+            dtype=np.float32,
+        )
+        rvec, _ = cv2.Rodrigues(r_x)
+        tvec = np.array([[0.0], [200.0], [1000.0]], dtype=np.float32)
+
+        pt = ar_math.ray_cast_to_ground((w / 2.0, h / 2.0), K, rvec, tvec)
+        self.assertIsNotNone(pt)
+        assert pt is not None
+        self.assertAlmostEqual(pt[2], 0.0, places=5)
+
+    def test_save_load_scene(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            scene_path = os.path.join(td, "scene.json")
+            blocks = [
+                {"pos": (0.0, 0.0, 0.0), "color": config.BLUE},
+                {"pos": (60.0, 0.0, 50.0), "color": config.RED},
+            ]
+            save_scene(blocks, scene_path)
+            loaded = load_scene(scene_path)
+            self.assertEqual(loaded, blocks)
+
+    def test_obj_export(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            out_path = os.path.join(td, "export.obj")
+            blocks = [{"pos": (0.0, 0.0, 0.0), "color": config.BLUE}]
+            path = export_to_obj(blocks, filepath=out_path, block_size=float(config.BLOCK_SIZE))
+            self.assertTrue(os.path.exists(path))
+            self.assertGreater(os.path.getsize(path), 0)
+
+
+if __name__ == "__main__":
     unittest.main()

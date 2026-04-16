@@ -1,80 +1,112 @@
-import config
 import math
+from copy import deepcopy
+from typing import Optional
+
+import config
+
 
 class BlockManager:
-    def __init__(self):
-        self.blocks = [] # List of {'pos': (x,y,z), 'color': ...}
-        self.grid_spacing = config.GRID_SPACING
-        
-    def snap_to_grid(self, x, y, z=0):
-        """
-        Snaps a raw 3D coordinate to the nearest grid point.
-        """
-        snapped_x = round(x / self.grid_spacing) * self.grid_spacing
-        snapped_y = round(y / self.grid_spacing) * self.grid_spacing
-        # Z is usually 0 (floor) or stacked
-        snapped_z = round(z / self.grid_spacing) * self.grid_spacing 
-        return snapped_x, snapped_y, snapped_z
+    def __init__(self) -> None:
+        self.blocks: list[dict] = []
+        self.history: list[list[dict]] = []
+        self.redo_stack: list[list[dict]] = []
 
-    def add_block(self, x, y, z=0, color=config.COLOR_BLUE):
+    def _snapshot(self) -> list[dict]:
+        return deepcopy(self.blocks)
+
+    def _push_undo_state(self) -> None:
+        self.history.append(self._snapshot())
+        self.redo_stack.clear()
+
+    def snap_to_grid(self, x: float, y: float, z: float) -> tuple[float, float, float]:
+        s_xy = float(config.GRID_SPACING)
+        s_z = float(config.BLOCK_SIZE)
+        sx = round(float(x) / s_xy) * s_xy
+        sy = round(float(y) / s_xy) * s_xy
+        sz = round(float(z) / s_z) * s_z
+        return sx, sy, sz
+
+    def add_block(self, x: float, y: float, z: float, color: tuple[int, int, int]) -> bool:
         sx, sy, sz = self.snap_to_grid(x, y, z)
-        # Check if block exists
         for b in self.blocks:
-            if b['pos'] == (sx, sy, sz):
-                return False # Block already exists
-        
-        # In a real 3D sense for AR, Z might be UP. 
-        # Here we assume Z=0 is floor, and positive Z is UP (away from floor).
-        # Adjust based on coordinate system later.
-        
-        # Simple stack check: If trying to place at Z=0 but there's a block there,
-        # we could automatically stack on top.
-        # For now, let's keep it simple: strict placement.
-        
-        self.blocks.append({'pos': (sx, sy, sz), 'color': color})
+            if b["pos"] == (sx, sy, sz):
+                return False
+
+        self._push_undo_state()
+        self.blocks.append({"pos": (sx, sy, sz), "color": color})
         return True
 
-    def get_block_at(self, x, y, z, tolerance=None):
-        """
-        Returns index and block if found at matching grid coordinates.
-        tolerance: if set, checks distance (useful for raycast picking).
-        """
-        sx, sy, sz = self.snap_to_grid(x, y, z)
-        
-        # If tolerance is used, we check distance to center
-        if tolerance:
+    def get_block_at(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        tolerance: Optional[float] = None,
+    ) -> tuple[int, Optional[dict]]:
+        if tolerance is None:
+            sx, sy, sz = self.snap_to_grid(x, y, z)
             for i, b in enumerate(self.blocks):
-                bx, by, bz = b['pos']
-                dist = math.sqrt((bx - x)**2 + (by - y)**2 + (bz - z)**2)
-                if dist < tolerance:
+                if b["pos"] == (sx, sy, sz):
                     return i, b
-        else:
-            # Strict grid match
-            for i, b in enumerate(self.blocks):
-                if b['pos'] == (sx, sy, sz):
-                    return i, b
-        
-        return -1, None
+            return -1, None
 
-    def remove_block(self, x, y, z):
-        # Allow removing by raw coord (snap inside)
+        tol = float(tolerance)
+        best_i = -1
+        best_block: Optional[dict] = None
+        best_dist = float("inf")
+
+        for i, b in enumerate(self.blocks):
+            bx, by, bz = b["pos"]
+            d = math.sqrt((bx - x) ** 2 + (by - y) ** 2 + (bz - z) ** 2)
+            if d <= tol and d < best_dist:
+                best_dist = d
+                best_i = i
+                best_block = b
+
+        return best_i, best_block
+
+    def remove_block(self, x: float, y: float, z: float) -> bool:
         idx, _ = self.get_block_at(x, y, z)
-        if idx != -1:
-            del self.blocks[idx]
-            return True
-        return False
-        
-    def move_block(self, index, new_x, new_y, new_z):
-        if 0 <= index < len(self.blocks):
-            sx, sy, sz = self.snap_to_grid(new_x, new_y, new_z)
-            # Check collision with other blocks (excluding itself)
-            for i, b in enumerate(self.blocks):
-                if i != index and b['pos'] == (sx, sy, sz):
-                    return False # Occupied
-            
-            self.blocks[index]['pos'] = (sx, sy, sz)
-            return True
-        return False
+        if idx == -1:
+            return False
+        self._push_undo_state()
+        del self.blocks[idx]
+        return True
 
-    def get_blocks(self):
+    def move_block(self, index: int, new_x: float, new_y: float, new_z: float) -> bool:
+        if index < 0 or index >= len(self.blocks):
+            return False
+
+        sx, sy, sz = self.snap_to_grid(new_x, new_y, new_z)
+
+        for i, b in enumerate(self.blocks):
+            if i == index:
+                continue
+            if b["pos"] == (sx, sy, sz):
+                return False
+
+        self._push_undo_state()
+        self.blocks[index]["pos"] = (sx, sy, sz)
+        return True
+
+    def get_blocks(self) -> list[dict]:
         return self.blocks
+
+    def set_blocks(self, blocks: list[dict]) -> None:
+        self.blocks = deepcopy(blocks)
+        self.history.clear()
+        self.redo_stack.clear()
+
+    def undo(self) -> bool:
+        if not self.history:
+            return False
+        self.redo_stack.append(self._snapshot())
+        self.blocks = self.history.pop()
+        return True
+
+    def redo(self) -> bool:
+        if not self.redo_stack:
+            return False
+        self.history.append(self._snapshot())
+        self.blocks = self.redo_stack.pop()
+        return True
