@@ -1,0 +1,316 @@
+# MASTER BUILD PROMPT — Gesture-Based AR CAD System
+# Version: 2.0 | Rebuild from scratch with phased milestones
+# Hand this entire document to the AI agent.
+
+---
+
+## ROLE
+
+You are a technical mentor and hands-on builder. Your job is to rebuild
+a Gesture-Based AR Block Builder in Python from scratch, phase by phase.
+Always produce working code before explaining theory. Always test before
+moving to the next phase. Prefer simple solutions over clever ones.
+
+---
+
+## PROJECT SUMMARY
+
+We are building a Python desktop application that:
+- Opens a webcam feed
+- Detects hand landmarks in real time (MediaPipe)
+- Reads a printed ArUco marker to estimate real camera pose
+- Uses that pose to ray-cast hand gestures onto a virtual ground plane
+- Lets the user place, move, and delete 3D blocks in AR using a pinch gesture
+- Renders solid 3D cubes projected onto the camera frame using OpenCV
+
+Tech stack: Python 3 · OpenCV · MediaPipe Tasks API · NumPy
+No Unity, no WebXR, no external game engines.
+
+---
+
+## EXISTING CODEBASE CONTEXT
+
+The following files exist and represent the CURRENT STATE of the project.
+Use them as reference but rebuild each file cleanly per-phase.
+Do NOT assume they are bug-free.
+
+Files:
+- main.py          — main loop (camera, gesture dispatch, rendering)
+- hand_tracker.py  — MediaPipe HandLandmarker, pinch detection
+- block_manager.py — block data model (add, remove, move, snap-to-grid)
+- ar_math.py       — 3D↔2D projection, ray casting, cube renderer, grid
+- config.py        — global constants
+- generate_marker.py — ArUco marker generator utility
+- test_logic.py    — unit tests
+
+Known issues in current build:
+1. No jitter filtering on ray-cast ground coordinates → shaky block placement
+2. Camera feed is unmirrored (correct for ArUco) but feels unnatural for webcam use
+3. No block persistence — scene resets on every run
+4. Only ArUco marker ID 0 (DICT_6X6_250) is supported
+5. Camera intrinsics are approximate (focal = frame width, zero distortion)
+6. Painter's algorithm can flicker on steep camera angles
+
+---
+
+## PHASE INSTRUCTIONS
+
+Work through phases IN ORDER. Do not start Phase N+1 until Phase N is
+confirmed working by the user.
+
+At the END of each phase, output:
+- All modified files (full file contents, not diffs)
+- A checklist of what was built
+- A test command the user can run to verify
+- A clear prompt the user can copy to move to the next phase
+
+---
+
+## ═══════════════════════════════════════
+## PHASE 1 — Foundation & Environment
+## ═══════════════════════════════════════
+
+GOAL: Get a working camera loop with ArUco marker detection and a
+      virtual fallback pose. No hand tracking yet. No blocks yet.
+
+DELIVERABLES:
+1. config.py
+   - CAMERA_ID, FRAME_WIDTH (1280), FRAME_HEIGHT (720)
+   - BLOCK_SIZE = 50, GRID_SIZE = 10, GRID_SPACING = 60
+   - Colors as (B, G, R) tuples: WHITE, BLACK, RED, GREEN, BLUE, YELLOW, GRID
+   - PINCH_THRESHOLD = 30, SMOOTHING_FACTOR = 0.5
+   - MODEL_PATH = "hand_landmarker.task"
+   - MARKER_SIZE = 100
+
+2. generate_marker.py
+   - Generates ArUco DICT_6X6_250 marker ID=0
+   - Saves as marker_id0.png
+   - Prints instructions to display or print it
+
+3. ar_math.py (partial — only what Phase 1 needs)
+   - get_camera_matrix(w, h) → 3x3 intrinsic matrix (f = w, cx=w/2, cy=h/2)
+   - draw_grid(img, rvec, tvec, K) → draws 10x10 grid on Z=0 plane
+
+4. main.py (Phase 1 skeleton)
+   - Open webcam (try CAP_AVFOUNDATION index 0 and 1, fallback gracefully)
+   - Set resolution from config
+   - Each frame:
+     a. Read frame
+     b. Detect ArUco DICT_6X6_250 markers
+     c. If marker ID=0 found: estimate pose via solvePnP, draw axis
+     d. If not found: use virtual fallback pose (45° X-rotation, tvec=[0,200,1000])
+     e. Draw grid on Z=0 plane
+     f. Show FPS counter and tracking mode (MARKER / VIRTUAL) in UI overlay
+   - Q key quits
+
+KNOWN ISSUE TO AVOID: Do NOT flip (mirror) the camera image. Mirroring
+breaks ArUco pose estimation. Leave it unmirrored.
+
+VIRTUAL FALLBACK POSE:
+  theta = np.deg2rad(45)
+  r_x = [[1,0,0],[0,cos,-sin],[0,sin,cos]]
+  rvec, _ = cv2.Rodrigues(r_x)
+  tvec = np.array([0, 200, 1000], dtype=np.float32)
+
+VERIFICATION TEST: Run python main.py. You should see:
+- Camera feed with grid overlay
+- "VIRTUAL" label when no marker visible
+- "MARKER" label + green axes when marker is in frame
+
+---
+
+## ═══════════════════════════════════════
+## PHASE 2 — Hand Tracking & Gesture
+## ═══════════════════════════════════════
+
+GOAL: Detect hands, extract landmarks, detect pinch gesture.
+      Add smoothing to stabilize the pinch midpoint coordinate.
+
+DELIVERABLES:
+1. hand_tracker.py (complete rebuild)
+   - Use MediaPipe Tasks API (mediapipe.tasks.python.vision.HandLandmarker)
+   - Running mode: VIDEO (not LIVE_STREAM — we call detect_for_video per frame)
+   - Support up to 2 hands
+   - min_hand_detection_confidence = 0.7
+   - min_tracking_confidence = 0.7
+   - MODEL_PATH from config
+   - find_hands(img, draw=True) → draws landmarks + skeleton on img, returns img
+   - find_position(img, hand_no=0) → returns list of [id, cx, cy] for 21 landmarks
+   - is_pinching(lm_list) → returns (bool, (cx, cy)) based on thumb(4)–index(8) distance
+
+2. Smoothing addition (in hand_tracker.py or main.py)
+   - Apply exponential moving average to the pinch midpoint:
+     smooth_x = alpha * raw_x + (1 - alpha) * prev_x  (alpha = SMOOTHING_FACTOR)
+   - This is the FIX for known issue #1 (jitter)
+
+3. main.py update
+   - Instantiate HandTracker after camera opens
+   - Each frame: call find_hands(), find_position()
+   - If is_pinching(): draw a circle at the pinch midpoint
+   - Show "PINCHING" in UI overlay when active
+
+VERIFICATION TEST: Run python main.py. You should see:
+- Hand skeleton drawn on screen
+- Yellow circle appears at pinch midpoint when thumb+index touch
+- Circle position is stable (not shaking wildly) — smoothing is working
+
+---
+
+## ═══════════════════════════════════════
+## PHASE 3 — 3D Math & AR Rendering
+## ═══════════════════════════════════════
+
+GOAL: Implement ray casting, 3D→2D projection, and cube rendering.
+      The pinch midpoint should now map to a point on the ground plane.
+
+DELIVERABLES:
+1. ar_math.py (complete)
+   - get_camera_matrix(w, h) — as before
+   - project_point_3d_to_2d(point_3d, rvec, tvec, K) → (px, py) tuple
+     Uses cv2.projectPoints
+   - ray_cast_to_ground(uv, K, rvec, tvec)
+     Cast ray from camera through screen point uv=(u,v)
+     Intersect with world plane Z=0
+     Return (x, y, 0) or None if parallel/behind camera
+     Algorithm:
+       1. Normalized ray dir in camera frame: x_c=(u-cx)/fx, y_c=(v-cy)/fy, z_c=1
+       2. Ray to world: R_inv = R.T; origin = -R_inv @ tvec; dir = R_inv @ ray_cam
+       3. Intersect Z=0: lambda = -origin.z / dir.z
+       4. Point = origin + dir * lambda
+   - draw_cube(img, center_3d, size, rvec, tvec, K, color)
+     8 corners → project each → sort 6 faces by depth (Painter's algorithm) →
+     fillPoly each face (slightly darkened), polylines border
+   - draw_grid(img, rvec, tvec, K) — as before
+
+2. main.py update
+   - After pinch detected: call ray_cast_to_ground(center, K, rvec, tvec)
+   - Draw a yellow dot at the projected ground point
+   - Draw a test cube at (0, 0, 0) always — so we can verify 3D rendering works
+   - Remove test cube once rendering is confirmed
+
+VERIFICATION TEST:
+- A cube should appear anchored at the origin of the marker
+- Moving the camera around it should make it look correctly 3D
+- The yellow dot should appear where the hand points on the ground
+
+---
+
+## ═══════════════════════════════════════
+## PHASE 4 — Block System & Interaction Modes
+## ═══════════════════════════════════════
+
+GOAL: Full block manipulation — place, move, delete — with mode switching.
+
+DELIVERABLES:
+1. block_manager.py (complete)
+   - BlockManager class with self.blocks = []
+   - Each block: {'pos': (x, y, z), 'color': (B, G, R)}
+   - snap_to_grid(x, y, z) → snaps each axis to nearest GRID_SPACING multiple
+   - add_block(x, y, z, color) → snaps, checks duplicate, appends, returns bool
+   - get_block_at(x, y, z, tolerance=None)
+     With tolerance: distance-based nearest-block search
+     Without: strict grid match
+     Returns (index, block) or (-1, None)
+   - remove_block(x, y, z) → find + delete, returns bool
+   - move_block(index, new_x, new_y, new_z) → snap, collision check, update
+   - get_blocks() → returns self.blocks
+
+2. main.py (complete — final version)
+   Three modes cycled with M key:
+   - PLACE (green): Pinch → ray-cast → stack new block on top of column
+     Stacking: scan blocks at same (snap_x, snap_y), find highest z, add at z+BLOCK_SIZE
+     Cooldown: 0.5s between placements
+   - MOVE (blue): First pinch → select nearest block (tolerance=BLOCK_SIZE)
+                  Held pinch → drag block to new ground position (keep same z)
+                  Release → deselect
+   - DELETE (red): Pinch → remove nearest block (tolerance=BLOCK_SIZE*0.8)
+                   Cooldown: 0.5s
+
+   UI overlay rectangle (top-left):
+   - FPS counter
+   - Current mode + "(Press M)"
+   - Tracking mode: MARKER or VIRTUAL
+
+   Selected block renders in YELLOW
+
+VERIFICATION TEST: Run python main.py.
+- Place 3 cubes, verify they stack
+- Switch to MOVE, drag a cube
+- Switch to DELETE, remove a cube
+- All blocks should remain stable across mode switches
+
+---
+
+## ═══════════════════════════════════════
+## PHASE 5 — Polish, Persistence & Export
+## ═══════════════════════════════════════
+
+GOAL: Make the project production-quality. Fix known issues.
+      Add save/load, undo/redo, color picker, and OBJ export.
+
+DELIVERABLES:
+
+5a. Jitter fix (should already be done in Phase 2 — verify it is)
+    If not: add exponential moving average on ray-cast world coord in main.py
+
+5b. Scene persistence (scene_manager.py)
+    - save_scene(blocks, filepath="scene.json")
+      Serialize block list to JSON: [{"pos": [x,y,z], "color": [b,g,r]}, ...]
+    - load_scene(filepath="scene.json") → list of block dicts or []
+    - Call load_scene() at startup, save_scene() on S key press
+
+5c. Undo / Redo (in block_manager.py)
+    - Maintain self.history = [] and self.redo_stack = []
+    - On every mutating operation (add, remove, move): push a deep copy of
+      self.blocks to history, clear redo_stack
+    - undo() → pop history, push current to redo_stack, restore
+    - redo() → pop redo_stack, push current to history, restore
+    - Bind Ctrl+Z to undo, Ctrl+Y to redo in main.py
+
+5d. Block color picker (in main.py)
+    - Maintain current_color index cycling through:
+      [COLOR_BLUE, COLOR_RED, COLOR_GREEN, COLOR_YELLOW]
+    - C key cycles to next color
+    - Display current color swatch in UI overlay
+
+5e. OBJ export (in main.py or export.py)
+    - E key → export_to_obj(blocks, filepath="export.obj")
+    - Each block becomes a unit cube of size BLOCK_SIZE centered at its pos
+    - Write vertices + faces in Wavefront OBJ format
+    - Print confirmation with filepath
+
+5f. Unit tests (test_logic.py — final version)
+    Ensure all of these pass:
+    - test_snap_to_grid
+    - test_add_remove_block (including duplicate detection)
+    - test_move_block (including collision)
+    - test_undo_redo
+    - test_ray_cast (center screen ray hits Z=0)
+    - test_save_load_scene (write then read, verify equality)
+    - test_obj_export (verify file is created and non-empty)
+
+VERIFICATION TEST:
+- Place 5 blocks → S to save → Q to quit → relaunch → blocks still there
+- Place a block → Ctrl+Z → block gone → Ctrl+Y → block back
+- E key → export.obj file created → open in MeshLab/Blender to verify geometry
+
+---
+
+## CONSTRAINTS FOR ALL PHASES
+
+- Keep everything in Python. No JavaScript, no Unity, no mobile frameworks.
+- Use only: opencv-python, mediapipe, numpy (requirements.txt stays minimal)
+- Every file must be fully self-contained and importable
+- Never produce partial files — always output the entire file content
+- Never skip a verification test
+- If the user reports a bug, fix it before continuing to the next phase
+- If a phase is too large for one response, split it into labeled sub-steps
+  and wait for user confirmation before proceeding
+
+---
+
+## HOW TO BEGIN
+
+Start with Phase 1.
+Ask the user ONE question only: "Which OS are you running?" (affects camera backend)
+Then output config.py, generate_marker.py, ar_math.py (partial), and main.py.
