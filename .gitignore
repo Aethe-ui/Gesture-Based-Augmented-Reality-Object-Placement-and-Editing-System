@@ -38,3 +38,8 @@ htmlcov/
 
 # OS files
 .DS_Store
+
+# Runtime / generated artifacts
+scene.json
+export.obj
+marker_id0.png

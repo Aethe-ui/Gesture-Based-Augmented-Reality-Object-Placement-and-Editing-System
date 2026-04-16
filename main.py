@@ -11,7 +11,7 @@ from hand_tracker import HandTracker
 from scene_manager import load_scene, save_scene
 
 
-WINDOW_NAME = "Gesture-Based AR Builder - Phase 4"
+WINDOW_NAME = "Gesture-Based AR Builder - Phase 5"
 
 MODE_PLACE = 0
 MODE_MOVE = 1
@@ -83,7 +83,6 @@ def detect_marker_pose(
     if ids is None:
         return None, None, False
 
-    cv2.aruco.drawDetectedMarkers(frame, corners, ids)
     object_points = create_marker_object_points(config.MARKER_SIZE)
 
     for marker_corners, marker_id in zip(corners, ids.flatten()):
@@ -153,6 +152,7 @@ def main() -> None:
     tracker = HandTracker()
     blocks = BlockManager()
     blocks.set_blocks(load_scene())
+    print("Controls: M mode, C color, S save, E export, Q quit, Undo: Ctrl+Z/Z/U, Redo: Ctrl+Y/Y/R")
 
     mode = MODE_PLACE
     mode_names = ["PLACE", "MOVE", "DELETE"]
@@ -307,25 +307,25 @@ def main() -> None:
 
         cv2.imshow(WINDOW_NAME, display_frame)
         key = cv2.waitKey(1) & 0xFF
-        if key == ord("q"):
+        if key in (ord("q"), ord("Q")):
             break
-        if key == ord("m"):
+        if key in (ord("m"), ord("M")):
             mode = (mode + 1) % 3
             selected_index = -1
             was_pinching = False
-        if key == ord("c"):
+        if key in (ord("c"), ord("C")):
             color_index = (color_index + 1) % len(place_colors)
-        if key == ord("s"):
+        if key in (ord("s"), ord("S")):
             save_scene(blocks.get_blocks())
             print("Scene saved to scene.json")
-        if key == ord("e"):
+        if key in (ord("e"), ord("E")):
             path = export_to_obj(blocks.get_blocks(), filepath="export.obj", block_size=float(config.BLOCK_SIZE))
             print(f"Exported OBJ to {path}")
-        if key == 26:  # Ctrl+Z
+        if key in (26, ord("z"), ord("Z"), ord("u"), ord("U")):  # Ctrl+Z plus fallbacks
             if blocks.undo():
                 selected_index = -1
                 print("Undo")
-        if key == 25:  # Ctrl+Y
+        if key in (25, ord("y"), ord("Y"), ord("r"), ord("R")):  # Ctrl+Y plus fallbacks
             if blocks.redo():
                 selected_index = -1
                 print("Redo")
