@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import config
+
 
 def export_to_obj(blocks: list[dict], filepath: str = "export.obj", block_size: float = 50.0) -> str:
     hs = float(block_size) / 2.0
@@ -8,15 +10,20 @@ def export_to_obj(blocks: list[dict], filepath: str = "export.obj", block_size: 
 
     for i, b in enumerate(blocks):
         cx, cy, cz = b["pos"]
+        shape_id = b.get("shape", 0)
+        shape_def = config.BLOCK_SHAPES.get(shape_id, config.BLOCK_SHAPES[0])
+        ssx, ssy, ssz = shape_def["size"]
+        hx, hy, hz = hs * ssx, hs * ssy, hs * ssz
+
         corners = [
-            (cx - hs, cy - hs, cz - hs),
-            (cx + hs, cy - hs, cz - hs),
-            (cx + hs, cy + hs, cz - hs),
-            (cx - hs, cy + hs, cz - hs),
-            (cx - hs, cy - hs, cz + hs),
-            (cx + hs, cy - hs, cz + hs),
-            (cx + hs, cy + hs, cz + hs),
-            (cx - hs, cy + hs, cz + hs),
+            (cx - hx, cy - hy, cz - hz),
+            (cx + hx, cy - hy, cz - hz),
+            (cx + hx, cy + hy, cz - hz),
+            (cx - hx, cy + hy, cz - hz),
+            (cx - hx, cy - hy, cz + hz),
+            (cx + hx, cy - hy, cz + hz),
+            (cx + hx, cy + hy, cz + hz),
+            (cx - hx, cy + hy, cz + hz),
         ]
 
         lines.append(f"o block_{i}")
@@ -42,3 +49,4 @@ def export_to_obj(blocks: list[dict], filepath: str = "export.obj", block_size: 
     path = Path(filepath)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return str(path)
+

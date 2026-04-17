@@ -11,6 +11,7 @@ def save_scene(blocks: list[dict], filepath: str = "scene.json") -> None:
             {
                 "pos": [x, y, z],
                 "color": [cb, cg, cr],
+                "shape": b.get("shape", 0),
             }
         )
 
@@ -41,6 +42,7 @@ def load_scene(filepath: str = "scene.json") -> list[dict]:
             {
                 "pos": (float(pos[0]), float(pos[1]), float(pos[2])),
                 "color": (int(color[0]), int(color[1]), int(color[2])),
+                "shape": int(item.get("shape", 0)),
             }
         )
 

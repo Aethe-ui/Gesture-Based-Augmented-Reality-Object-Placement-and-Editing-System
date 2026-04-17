@@ -137,3 +137,71 @@ class HandTracker:
         cx = (x1 + x2) / 2.0
         cy = (y1 + y2) / 2.0
         return True, self._smooth_point((cx, cy))
+
+    # ── Gesture detection (Phase 9) ──────────────────────────────────
+
+    @staticmethod
+    def count_extended_fingers(lm_list: list[list[int]]) -> int:
+        """Count how many fingers are extended (0–5).
+
+        Heuristic:
+        - Fingers 1-4 (index, middle, ring, pinky): tip y < PIP y → extended
+        - Thumb: uses x-axis comparison relative to wrist side
+        """
+        if len(lm_list) < 21:
+            return 0
+
+        count = 0
+
+        # Thumb: compare tip (4) x to IP joint (3) x.
+        # If wrist (0) is to the left of middle MCP (9), right hand → tip.x < IP.x = extended
+        # Otherwise left hand → tip.x > IP.x = extended
+        wrist_x = lm_list[0][1]
+        mid_mcp_x = lm_list[9][1]
+        if wrist_x < mid_mcp_x:
+            # Right hand (in image coords) — thumb extends left
+            if lm_list[4][1] < lm_list[3][1]:
+                count += 1
+        else:
+            # Left hand — thumb extends right
+            if lm_list[4][1] > lm_list[3][1]:
+                count += 1
+
+        # Index (8 vs 6), Middle (12 vs 10), Ring (16 vs 14), Pinky (20 vs 18)
+        tip_pip_pairs = [(8, 6), (12, 10), (16, 14), (20, 18)]
+        for tip_id, pip_id in tip_pip_pairs:
+            if lm_list[tip_id][2] < lm_list[pip_id][2]:  # tip y < pip y → extended
+                count += 1
+
+        return count
+
+    @staticmethod
+    def is_open_palm(lm_list: list[list[int]]) -> bool:
+        """All 5 fingers extended."""
+        if len(lm_list) < 21:
+            return False
+        return HandTracker.count_extended_fingers(lm_list) == 5
+
+    @staticmethod
+    def is_fist(lm_list: list[list[int]]) -> bool:
+        """Zero fingers extended."""
+        if len(lm_list) < 21:
+            return False
+        return HandTracker.count_extended_fingers(lm_list) == 0
+
+    @staticmethod
+    def is_peace_sign(lm_list: list[list[int]]) -> bool:
+        """Index and middle extended, ring/pinky/thumb NOT extended."""
+        if len(lm_list) < 21:
+            return False
+        # Index tip above PIP
+        index_ext = lm_list[8][2] < lm_list[6][2]
+        # Middle tip above PIP
+        middle_ext = lm_list[12][2] < lm_list[10][2]
+        # Ring NOT extended
+        ring_ext = lm_list[16][2] < lm_list[14][2]
+        # Pinky NOT extended
+        pinky_ext = lm_list[20][2] < lm_list[18][2]
+
+        return index_ext and middle_ext and not ring_ext and not pinky_ext
+

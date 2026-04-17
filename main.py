@@ -11,7 +11,7 @@ from hand_tracker import HandTracker
 from scene_manager import load_scene, save_scene
 
 
-WINDOW_NAME = "Gesture-Based AR Builder - Phase 6"
+WINDOW_NAME = "Gesture-Based AR Builder - Phase 10"
 
 MODE_PLACE = 0
 MODE_MOVE = 1
@@ -163,17 +163,21 @@ def draw_overlay(
     mode_name: str,
     mode_color: tuple[int, int, int],
     current_color: tuple[int, int, int],
+    shape_name: str = "CUBE",
 ) -> None:
-    cv2.rectangle(frame, (10, 10), (420, 125), (40, 40, 40), cv2.FILLED)
+    cv2.rectangle(frame, (10, 10), (480, 155), (40, 40, 40), cv2.FILLED)
     cv2.putText(frame, f"FPS: {fps:.1f}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, config.WHITE, 2)
     cv2.putText(
         frame,
-        f"Mode: {mode_name} (Press M)",
+        f"Mode: {mode_name}  Shape: {shape_name} (T)",
         (20, 70),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.7,
         mode_color,
         2,
+    )
+    tracking_color = config.GREEN if tracking_mode.startswith("MARKER") else (
+        (255, 255, 0) if tracking_mode.startswith("FLOW") else config.YELLOW
     )
     cv2.putText(
         frame,
@@ -181,8 +185,18 @@ def draw_overlay(
         (20, 100),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.7,
-        config.GREEN if tracking_mode.startswith("MARKER") else config.YELLOW,
+        tracking_color,
         2,
+    )
+    # Gesture hint row (Phase 9)
+    cv2.putText(
+        frame,
+        "Palm=mode  Fist=undo  Peace=del",
+        (20, 130),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        (180, 180, 180),
+        1,
     )
     cv2.rectangle(frame, (350, 20), (400, 70), current_color, cv2.FILLED)
     cv2.rectangle(frame, (350, 20), (400, 70), config.WHITE, 2)
@@ -205,6 +219,12 @@ def main() -> None:
     stabilizer = ar_math.PoseStabilizer()
     was_tracking_markers = False
 
+    # ── Optical-flow state (Phase 7) ──────────────────────────────
+    prev_gray: np.ndarray | None = None
+    flow_frame_count = 0
+    last_marker_rvec: np.ndarray | None = None
+    last_marker_tvec: np.ndarray | None = None
+
     tracker = HandTracker()
     blocks = BlockManager()
     blocks.set_blocks(load_scene())
@@ -215,11 +235,17 @@ def main() -> None:
     mode_colors = [config.GREEN, config.BLUE, config.RED]
     place_colors = [config.BLUE, config.RED, config.GREEN, config.YELLOW]
     color_index = 0
+    current_shape = 0  # Phase 10: shape cycling (0=CUBE, 1=SLAB, 2=WALL)
 
     selected_index = -1
     was_pinching = False
     last_action_time = 0.0
     cooldown_s = 0.5
+
+    # ── Gesture state machine (Phase 9) ──────────────────────────────
+    palm_hold_frames = 0
+    fist_triggered = False
+    peace_triggered = False
 
     def top_block_index_at(sx: float, sy: float) -> int:
         best_i = -1
@@ -241,7 +267,7 @@ def main() -> None:
 
         source_frame = frame
 
-        # Pre-compute greyscale once — used for corner refinement
+        # Pre-compute greyscale once — used for corner refinement & flow
         gray = cv2.cvtColor(source_frame, cv2.COLOR_BGR2GRAY)
 
         marker_rvec, marker_tvec, marker_count = detect_marker_pose(
@@ -249,13 +275,11 @@ def main() -> None:
         )
 
         if marker_count > 0:
+            # ── Markers detected: use fused marker pose ───────────
             if not was_tracking_markers:
-                # Transitioning from VIRTUAL → MARKER: reset stabilizer
-                # so the first marker frame isn't rejected as an outlier.
                 stabilizer.reset()
                 was_tracking_markers = True
 
-            # Apply temporal smoothing
             rvec, tvec = stabilizer.update(marker_rvec, marker_tvec)
             tracking_mode = f"MARKER({marker_count})"
             cv2.drawFrameAxes(
@@ -266,7 +290,39 @@ def main() -> None:
                 tvec,
                 60,
             )
+
+            # Save state for optical-flow fallback
+            last_marker_rvec = rvec.copy()
+            last_marker_tvec = tvec.copy()
+            flow_frame_count = 0
+            prev_gray = gray.copy()
+
+        elif (
+            flow_frame_count < config.FLOW_MAX_FRAMES
+            and prev_gray is not None
+            and last_marker_rvec is not None
+            and last_marker_tvec is not None
+        ):
+            # ── Markers lost: attempt optical-flow interpolation ──
+            flow_rvec, flow_tvec, flow_ok = ar_math.interpolate_pose_with_flow(
+                last_marker_rvec, last_marker_tvec, prev_gray, gray, camera_matrix
+            )
+            if flow_ok:
+                rvec, tvec = flow_rvec, flow_tvec
+                flow_frame_count += 1
+                tracking_mode = f"FLOW({flow_frame_count})"
+                # Update last known pose so next flow step chains correctly
+                last_marker_rvec = rvec.copy()
+                last_marker_tvec = tvec.copy()
+                prev_gray = gray.copy()
+            else:
+                # Flow failed — fall back to virtual
+                rvec = virtual_rvec
+                tvec = virtual_tvec
+                tracking_mode = "VIRTUAL"
+                was_tracking_markers = False
         else:
+            # ── Fully lost or flow budget exhausted ───────────────
             rvec = virtual_rvec
             tvec = virtual_tvec
             tracking_mode = "VIRTUAL"
@@ -277,8 +333,49 @@ def main() -> None:
         pinching = False
         pinch_center = (0, 0)
         ground = None
+        hand_ground = None  # ray-cast from hand even when not pinching
         if lm_list:
             pinching, pinch_center = tracker.is_pinching(lm_list)
+            # Always ray-cast from index fingertip (landmark 8) for ghost cursor
+            idx_tip = (lm_list[8][1], lm_list[8][2])
+            hand_ground = ar_math.ray_cast_to_ground(idx_tip, camera_matrix, rvec, tvec)
+
+        # ── Gesture recognition (Phase 9) ─────────────────────────
+        if lm_list:
+            # A. Open palm → cycle mode (must hold 10+ frames)
+            if tracker.is_open_palm(lm_list):
+                palm_hold_frames += 1
+                if palm_hold_frames == 10:
+                    mode = (mode + 1) % 3
+                    selected_index = -1
+                    was_pinching = False
+                    print(f"Gesture: PALM → mode = {mode_names[mode]}")
+            else:
+                palm_hold_frames = 0
+
+            # B. Fist → undo (on transition)
+            if tracker.is_fist(lm_list):
+                if not fist_triggered:
+                    fist_triggered = True
+                    if blocks.undo():
+                        selected_index = -1
+                        print("Gesture: FIST → Undo")
+            else:
+                fist_triggered = False
+
+            # C. Peace sign → toggle DELETE mode (on transition)
+            if tracker.is_peace_sign(lm_list):
+                if not peace_triggered:
+                    peace_triggered = True
+                    mode = MODE_DELETE
+                    selected_index = -1
+                    print("Gesture: PEACE → DELETE mode")
+            else:
+                peace_triggered = False
+        else:
+            palm_hold_frames = 0
+            fist_triggered = False
+            peace_triggered = False
 
         if pinching:
             cv2.circle(source_frame, pinch_center, 14, mode_colors[mode], cv2.FILLED)
@@ -298,14 +395,33 @@ def main() -> None:
                 gx, gy, _ = ground
                 sx, sy, _ = blocks.snap_to_grid(gx, gy, 0.0)
 
-                max_z = -float(config.BLOCK_SIZE)
+                # Get current shape size multipliers
+                cur_shape_def = config.BLOCK_SHAPES.get(current_shape, config.BLOCK_SHAPES[0])
+                cur_sx, cur_sy, cur_sz = cur_shape_def["size"]
+                bs = float(config.BLOCK_SIZE)
+
+                # New block XY footprint
+                new_hx = bs * cur_sx / 2.0
+                new_hy = bs * cur_sy / 2.0
+
+                # Face snapping: find the highest top face of any block
+                # whose XY footprint overlaps with the new block's footprint.
+                max_top = 0.0  # ground level
                 for b in blocks.get_blocks():
                     bx, by, bz = b["pos"]
-                    if bx == sx and by == sy:
-                        max_z = max(max_z, bz)
+                    b_shape = config.BLOCK_SHAPES.get(b.get("shape", 0), config.BLOCK_SHAPES[0])
+                    b_ssx, b_ssy, b_ssz = b_shape["size"]
+                    b_hx = bs * b_ssx / 2.0
+                    b_hy = bs * b_ssy / 2.0
+                    # Check XY overlap
+                    if (sx - new_hx < bx + b_hx - 0.1 and sx + new_hx > bx - b_hx + 0.1 and
+                            sy - new_hy < by + b_hy - 0.1 and sy + new_hy > by - b_hy + 0.1):
+                        b_top = bz + bs * b_ssz / 2.0
+                        max_top = max(max_top, b_top)
 
-                new_z = max_z + float(config.BLOCK_SIZE)
-                blocks.add_block(sx, sy, new_z, color=place_colors[color_index])
+                # New block center z = top of stack + half of new block height
+                new_z = max_top + bs * cur_sz / 2.0
+                blocks.add_block(sx, sy, new_z, color=place_colors[color_index], shape=current_shape)
                 last_action_time = now
 
         elif mode == MODE_MOVE:
@@ -345,6 +461,8 @@ def main() -> None:
             col = b["color"]
             if i == selected_index:
                 col = config.YELLOW
+            b_shape = config.BLOCK_SHAPES.get(b.get("shape", 0), config.BLOCK_SHAPES[0])
+            b_sx, b_sy, b_sz = b_shape["size"]
             ar_math.draw_cube(
                 source_frame,
                 center_3d=pos,
@@ -353,6 +471,46 @@ def main() -> None:
                 tvec=tvec,
                 K=camera_matrix,
                 color=col,
+                sx=b_sx, sy=b_sy, sz=b_sz,
+            )
+
+        # ── Ghost cursor wireframe (Phase 8+10) ───────────────────
+        # In PLACE mode, when hand is visible but NOT pinching,
+        # show a wireframe preview at the predicted landing position.
+        if mode == MODE_PLACE and lm_list and not pinching and hand_ground is not None:
+            hgx, hgy, _ = hand_ground
+            ghost_sx, ghost_sy, _ = blocks.snap_to_grid(hgx, hgy, 0.0)
+
+            g_shape_def = config.BLOCK_SHAPES.get(current_shape, config.BLOCK_SHAPES[0])
+            g_ssx, g_ssy, g_ssz = g_shape_def["size"]
+            bs = float(config.BLOCK_SIZE)
+            g_hx = bs * g_ssx / 2.0
+            g_hy = bs * g_ssy / 2.0
+
+            # Compute ghost Z using footprint overlap (same logic as placement)
+            ghost_max_top = 0.0
+            for b in blocks.get_blocks():
+                bx, by, bz = b["pos"]
+                b_shape = config.BLOCK_SHAPES.get(b.get("shape", 0), config.BLOCK_SHAPES[0])
+                b_ssx, b_ssy, b_ssz = b_shape["size"]
+                b_hx = bs * b_ssx / 2.0
+                b_hy = bs * b_ssy / 2.0
+                if (ghost_sx - g_hx < bx + b_hx - 0.1 and ghost_sx + g_hx > bx - b_hx + 0.1 and
+                        ghost_sy - g_hy < by + b_hy - 0.1 and ghost_sy + g_hy > by - b_hy + 0.1):
+                    b_top = bz + bs * b_ssz / 2.0
+                    ghost_max_top = max(ghost_max_top, b_top)
+            ghost_z = ghost_max_top + bs * g_ssz / 2.0
+
+            ar_math.draw_wireframe_cube(
+                source_frame,
+                center_3d=(ghost_sx, ghost_sy, ghost_z),
+                size=bs,
+                rvec=rvec,
+                tvec=tvec,
+                K=camera_matrix,
+                color=place_colors[color_index],
+                alpha=0.4,
+                sx=g_ssx, sy=g_ssy, sz=g_ssz,
             )
 
         # Mirror ONLY the camera feed for display.
@@ -362,6 +520,7 @@ def main() -> None:
         fps = 1.0 / max(current_time - previous_time, 1e-6)
         previous_time = current_time
         # Draw overlay after mirroring so it stays top-left.
+        shape_name = config.BLOCK_SHAPES.get(current_shape, config.BLOCK_SHAPES[0])["name"]
         draw_overlay(
             display_frame,
             fps,
@@ -369,6 +528,7 @@ def main() -> None:
             mode_names[mode],
             mode_colors[mode],
             place_colors[color_index],
+            shape_name=shape_name,
         )
 
         cv2.imshow(WINDOW_NAME, display_frame)
@@ -381,6 +541,9 @@ def main() -> None:
             was_pinching = False
         if key in (ord("c"), ord("C")):
             color_index = (color_index + 1) % len(place_colors)
+        if key in (ord("t"), ord("T")):
+            current_shape = (current_shape + 1) % len(config.BLOCK_SHAPES)
+            print(f"Shape: {config.BLOCK_SHAPES[current_shape]['name']}")
         if key in (ord("s"), ord("S")):
             save_scene(blocks.get_blocks())
             print("Scene saved to scene.json")
