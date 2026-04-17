@@ -90,6 +90,23 @@ class TestARLogic(unittest.TestCase):
             self.assertTrue(os.path.exists(path))
             self.assertGreater(os.path.getsize(path), 0)
 
+    def test_fuse_poses(self) -> None:
+        rvec = np.array([[0.1], [0.2], [0.3]], dtype=np.float32)
+        tvec = np.array([[10.0], [20.0], [30.0]], dtype=np.float32)
+        fused_rvec, fused_tvec = ar_math.fuse_poses([(rvec, tvec, 1.0), (rvec, tvec, 1.0)])
+        self.assertTrue(np.allclose(fused_rvec, rvec))
+        self.assertTrue(np.allclose(fused_tvec, tvec))
+
+    def test_fuse_poses_average(self) -> None:
+        rvec_a = np.array([[0.0], [0.0], [0.0]], dtype=np.float32)
+        tvec_a = np.array([[0.0], [0.0], [0.0]], dtype=np.float32)
+        rvec_b = np.array([[0.2], [0.2], [0.2]], dtype=np.float32)
+        tvec_b = np.array([[100.0], [50.0], [20.0]], dtype=np.float32)
+
+        fused_rvec, fused_tvec = ar_math.fuse_poses([(rvec_a, tvec_a, 1.0), (rvec_b, tvec_b, 1.0)])
+        self.assertTrue(np.allclose(fused_rvec, np.array([[0.1], [0.1], [0.1]], dtype=np.float32)))
+        self.assertTrue(np.allclose(fused_tvec, np.array([[50.0], [25.0], [10.0]], dtype=np.float32)))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,7 +11,7 @@ from hand_tracker import HandTracker
 from scene_manager import load_scene, save_scene
 
 
-WINDOW_NAME = "Gesture-Based AR Builder - Phase 5"
+WINDOW_NAME = "Gesture-Based AR Builder - Phase 6"
 
 MODE_PLACE = 0
 MODE_MOVE = 1
@@ -73,34 +73,87 @@ def create_marker_object_points(marker_size: float) -> np.ndarray:
     )
 
 
+def create_optimised_detector() -> cv2.aruco.ArucoDetector:
+    """Create an ArUco detector with tuned parameters for stability."""
+    aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
+    params = cv2.aruco.DetectorParameters()
+
+    # ── Adaptive thresholding tuning ──────────────────────────────
+    params.adaptiveThreshWinSizeMin = 3
+    params.adaptiveThreshWinSizeMax = 23
+    params.adaptiveThreshWinSizeStep = 10
+    params.adaptiveThreshConstant = 7
+
+    # ── Corner refinement (built-in ArUco sub-pixel) ──────────────
+    params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+    params.cornerRefinementWinSize = 5
+    params.cornerRefinementMaxIterations = 30
+    params.cornerRefinementMinAccuracy = 0.01
+
+    # ── Relax detection to accept more markers ────────────────────
+    params.minMarkerPerimeterRate = 0.02     # detect smaller markers
+    params.maxMarkerPerimeterRate = 4.0
+    params.polygonalApproxAccuracyRate = 0.05
+    params.minCornerDistanceRate = 0.05
+    params.minDistanceToBorder = 3
+
+    # ── Error correction ──────────────────────────────────────────
+    params.errorCorrectionRate = 0.6         # allow some bit errors
+
+    return cv2.aruco.ArucoDetector(aruco_dict, params)
+
+
 def detect_marker_pose(
     frame: np.ndarray,
+    gray: np.ndarray,
     detector: cv2.aruco.ArucoDetector,
     camera_matrix: np.ndarray,
-) -> tuple[np.ndarray | None, np.ndarray | None, bool]:
+) -> tuple[np.ndarray | None, np.ndarray | None, int]:
     corners, ids, _ = detector.detectMarkers(frame)
 
     if ids is None:
-        return None, None, False
+        return None, None, 0
 
-    object_points = create_marker_object_points(config.MARKER_SIZE)
+    # Additional sub-pixel refinement on the greyscale image
+    corners = ar_math.refine_marker_corners(gray, corners)
+
+    base_object_points = create_marker_object_points(config.MARKER_SIZE)
+    pose_list: list[tuple[np.ndarray, np.ndarray, float]] = []
 
     for marker_corners, marker_id in zip(corners, ids.flatten()):
-        if int(marker_id) != 0:
+        marker_id_int = int(marker_id)
+        if marker_id_int not in config.MARKER_IDS:
             continue
+
+        marker_offset = np.array(config.MARKER_POSITIONS[marker_id_int], dtype=np.float32).reshape(1, 3)
+        object_points = base_object_points + marker_offset
 
         success, rvec, tvec = cv2.solvePnP(
             object_points,
-            marker_corners[0].astype(np.float32),
+            marker_corners.reshape(4, 2).astype(np.float32),
             camera_matrix,
             np.zeros((5, 1), dtype=np.float32),
             flags=cv2.SOLVEPNP_IPPE_SQUARE,
         )
 
         if success:
-            return rvec.astype(np.float32), tvec.astype(np.float32), True
+            # solvePnP can return multiple solutions with IPPE_SQUARE;
+            # refine with iterative LM for sub-pixel accuracy.
+            rvec, tvec = cv2.solvePnPRefineLM(
+                object_points,
+                marker_corners.reshape(4, 2).astype(np.float32),
+                camera_matrix,
+                np.zeros((5, 1), dtype=np.float32),
+                rvec,
+                tvec,
+            )
+            pose_list.append((rvec.astype(np.float32), tvec.astype(np.float32), 1.0))
 
-    return None, None, False
+    if not pose_list:
+        return None, None, 0
+
+    fused_rvec, fused_tvec = ar_math.fuse_poses(pose_list)
+    return fused_rvec, fused_tvec, len(pose_list)
 
 
 def draw_overlay(
@@ -128,7 +181,7 @@ def draw_overlay(
         (20, 100),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.7,
-        config.GREEN if tracking_mode == "MARKER" else config.YELLOW,
+        config.GREEN if tracking_mode.startswith("MARKER") else config.YELLOW,
         2,
     )
     cv2.rectangle(frame, (350, 20), (400, 70), current_color, cv2.FILLED)
@@ -145,9 +198,12 @@ def main() -> None:
     camera_matrix = ar_math.get_camera_matrix(width, height)
     virtual_rvec, virtual_tvec = create_virtual_pose()
 
-    aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
-    aruco_params = cv2.aruco.DetectorParameters()
-    detector = cv2.aruco.ArucoDetector(aruco_dict, aruco_params)
+    # Use the optimised detector with tuned parameters
+    detector = create_optimised_detector()
+
+    # Pose stabiliser for temporal smoothing
+    stabilizer = ar_math.PoseStabilizer()
+    was_tracking_markers = False
 
     tracker = HandTracker()
     blocks = BlockManager()
@@ -183,16 +239,25 @@ def main() -> None:
             print("Camera read failed; exiting.")
             break
 
-        # IMPORTANT:
-        # - We keep the source frame unmirrored for ArUco pose estimation.
-        # - We mirror only the displayed feed for a natural webcam experience.
         source_frame = frame
 
-        marker_rvec, marker_tvec, marker_found = detect_marker_pose(source_frame, detector, camera_matrix)
-        if marker_found:
-            rvec = marker_rvec
-            tvec = marker_tvec
-            tracking_mode = "MARKER"
+        # Pre-compute greyscale once — used for corner refinement
+        gray = cv2.cvtColor(source_frame, cv2.COLOR_BGR2GRAY)
+
+        marker_rvec, marker_tvec, marker_count = detect_marker_pose(
+            source_frame, gray, detector, camera_matrix
+        )
+
+        if marker_count > 0:
+            if not was_tracking_markers:
+                # Transitioning from VIRTUAL → MARKER: reset stabilizer
+                # so the first marker frame isn't rejected as an outlier.
+                stabilizer.reset()
+                was_tracking_markers = True
+
+            # Apply temporal smoothing
+            rvec, tvec = stabilizer.update(marker_rvec, marker_tvec)
+            tracking_mode = f"MARKER({marker_count})"
             cv2.drawFrameAxes(
                 source_frame,
                 camera_matrix,
@@ -205,6 +270,7 @@ def main() -> None:
             rvec = virtual_rvec
             tvec = virtual_tvec
             tracking_mode = "VIRTUAL"
+            was_tracking_markers = False
 
         tracker.find_hands(source_frame, draw=True)
         lm_list = tracker.find_position(source_frame, hand_no=0)
