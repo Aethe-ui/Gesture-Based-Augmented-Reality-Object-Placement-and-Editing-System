@@ -118,42 +118,73 @@ def detect_marker_pose(
     corners = ar_math.refine_marker_corners(gray, corners)
 
     base_object_points = create_marker_object_points(config.MARKER_SIZE)
-    pose_list: list[tuple[np.ndarray, np.ndarray, float]] = []
+    dist_coeffs = np.zeros((5, 1), dtype=np.float32)
+
+    # Collect ALL 2D-3D correspondences from every known marker into
+    # single arrays so we can run ONE solvePnP call.  This is far more
+    # stable than solving each marker independently and then averaging
+    # the rotation vectors (which is mathematically invalid and causes
+    # the jitter/rotation you see with multiple markers).
+    all_obj_pts: list[np.ndarray] = []
+    all_img_pts: list[np.ndarray] = []
+    marker_count = 0
 
     for marker_corners, marker_id in zip(corners, ids.flatten()):
         marker_id_int = int(marker_id)
         if marker_id_int not in config.MARKER_IDS:
             continue
 
-        marker_offset = np.array(config.MARKER_POSITIONS[marker_id_int], dtype=np.float32).reshape(1, 3)
+        marker_offset = np.array(
+            config.MARKER_POSITIONS[marker_id_int], dtype=np.float32
+        ).reshape(1, 3)
         object_points = base_object_points + marker_offset
 
-        success, rvec, tvec = cv2.solvePnP(
-            object_points,
-            marker_corners.reshape(4, 2).astype(np.float32),
-            camera_matrix,
-            np.zeros((5, 1), dtype=np.float32),
-            flags=cv2.SOLVEPNP_IPPE_SQUARE,
+        all_obj_pts.append(object_points)                          # (4, 3)
+        all_img_pts.append(
+            marker_corners.reshape(4, 2).astype(np.float32)        # (4, 2)
         )
+        marker_count += 1
 
-        if success:
-            # solvePnP can return multiple solutions with IPPE_SQUARE;
-            # refine with iterative LM for sub-pixel accuracy.
-            rvec, tvec = cv2.solvePnPRefineLM(
-                object_points,
-                marker_corners.reshape(4, 2).astype(np.float32),
-                camera_matrix,
-                np.zeros((5, 1), dtype=np.float32),
-                rvec,
-                tvec,
-            )
-            pose_list.append((rvec.astype(np.float32), tvec.astype(np.float32), 1.0))
-
-    if not pose_list:
+    if marker_count == 0:
         return None, None, 0
 
-    fused_rvec, fused_tvec = ar_math.fuse_poses(pose_list)
-    return fused_rvec, fused_tvec, len(pose_list)
+    combined_obj = np.vstack(all_obj_pts)   # (4*N, 3)
+    combined_img = np.vstack(all_img_pts)   # (4*N, 2)
+
+    # For a single marker keep the fast IPPE_SQUARE solver; for
+    # multiple markers use the iterative solver (IPPE_SQUARE only
+    # works for exactly 4 coplanar points).
+    if marker_count == 1:
+        flags = cv2.SOLVEPNP_IPPE_SQUARE
+    else:
+        flags = cv2.SOLVEPNP_ITERATIVE
+
+    success, rvec, tvec = cv2.solvePnP(
+        combined_obj,
+        combined_img,
+        camera_matrix,
+        dist_coeffs,
+        flags=flags,
+    )
+
+    if not success:
+        return None, None, 0
+
+    # Refine with Levenberg-Marquardt for sub-pixel accuracy
+    rvec, tvec = cv2.solvePnPRefineLM(
+        combined_obj,
+        combined_img,
+        camera_matrix,
+        dist_coeffs,
+        rvec,
+        tvec,
+    )
+
+    return (
+        rvec.astype(np.float32),
+        tvec.astype(np.float32),
+        marker_count,
+    )
 
 
 def draw_overlay(
